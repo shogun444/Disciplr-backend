@@ -1,7 +1,9 @@
-import { Server } from '@stellar/stellar-sdk'
+import * as StellarSdk from '@stellar/stellar-sdk'
 import { db } from '../db/knex.js'
 import { getValidatedConfig } from '../config/horizonListener.js'
 import { markVaultExpiries } from './vault.js'
+
+const HorizonServer = (StellarSdk as any).Horizon?.Server ?? (StellarSdk as any).Server
 
 let monitorInterval: NodeJS.Timeout | null = null
 
@@ -11,7 +13,7 @@ let monitorInterval: NodeJS.Timeout | null = null
 export const checkListenerLag = async (): Promise<void> => {
   try {
     const config = getValidatedConfig()
-    const server = new Server(config.horizonUrl)
+    const server = new HorizonServer(config.horizonUrl)
     
     // Fetch latest ledger from Horizon
     const ledgerPage = await server.ledgers().order('desc').limit(1).call()

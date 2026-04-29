@@ -18,7 +18,7 @@ export interface HorizonListenerConfig {
   retryMaxAttempts: number
   retryBackoffMs: number
   shutdownTimeoutMs: number
-  lagThreshold: number
+  lagThreshold?: number
 }
 
 function parseNonNegativeInteger(value: string | undefined, fallback?: number): number | undefined {
@@ -61,7 +61,7 @@ export function loadHorizonListenerConfig(): HorizonListenerConfig {
     retryMaxAttempts,
     retryBackoffMs,
     shutdownTimeoutMs,
-    lagThreshold,
+    lagThreshold: lagThresholdRaw ? Number(lagThresholdRaw) : 30,
   }
 }
 
