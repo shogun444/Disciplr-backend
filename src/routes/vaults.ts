@@ -144,6 +144,9 @@ vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
     res.status(404).json({ error: 'Vault not found' })
     return
   }
+  
+  // Return the vault found in legacy in-memory storage
+  res.json(vault)
 })
 
 // ─── POST /api/vaults/:id/cancel ─────────────────────────────────────────────
