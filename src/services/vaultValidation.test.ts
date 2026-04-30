@@ -57,16 +57,26 @@ describe("createVaultSchema validation", () => {
   });
 
   it("rejects non-string amount types", () => {
-    const result = createVaultSchema.safeParse({
-      ...validPayload(),
-      amount: true as any,
+    const invalidTypes: (null | undefined | number | boolean | unknown[] | Record<string, unknown>)[] = [
+      null,
+      undefined,
+      123,
+      true,
+      [],
+      {},
+    ];
+    invalidTypes.forEach((invalidType) => {
+      const result = createVaultSchema.safeParse({
+        ...validPayload(),
+        amount: invalidType as unknown as string,
+      });
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(flattenZodErrors(result.error)).toEqual([
+          expect.objectContaining({ path: "amount", message: "required" }),
+        ]);
+      }
     });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(flattenZodErrors(result.error)).toEqual([
-        expect.objectContaining({ path: "amount", message: "required" }),
-      ]);
-    }
   });
 
   it("rejects amount below minimum", () => {
@@ -401,7 +411,7 @@ describe("createVaultSchema validation", () => {
       expect(result2.success).toBe(false)
 
       // Test non-string types separately since they fail at the string level
-      const nonStringTimestamps = [1234567890, null, undefined, {}, []]
+      const nonStringTimestamps: (number | null | undefined | Record<string, unknown> | unknown[])[] = [1234567890, null, undefined, {}, []]
       nonStringTimestamps.forEach((timestamp) => {
         const result = createVaultSchema.safeParse({ ...validPayload(), startDate: timestamp })
         expect(result.success).toBe(false)
@@ -444,7 +454,7 @@ describe("createVaultSchema validation", () => {
 
   describe("Field type validation", () => {
     it("rejects null values for required fields", () => {
-      const nullFields = [
+      const requiredFields: string[] = [
         "amount",
         "startDate",
         "endDate",
@@ -453,16 +463,16 @@ describe("createVaultSchema validation", () => {
         "milestones",
       ];
 
-      nullFields.forEach((field) => {
-        const payload = validPayload();
-        (payload as any)[field] = null;
+      requiredFields.forEach((field) => {
+        const payload: Record<string, unknown> = validPayload();
+        payload[field] = null;
         const result = createVaultSchema.safeParse(payload);
         expect(result.success).toBe(false);
       });
     });
 
     it("rejects undefined values for required fields", () => {
-      const undefinedFields = [
+      const requiredFields: string[] = [
         "amount",
         "startDate",
         "endDate",
@@ -471,19 +481,18 @@ describe("createVaultSchema validation", () => {
         "milestones",
       ];
 
-      undefinedFields.forEach((field) => {
-        const payload = validPayload();
-        delete (payload as any)[field];
+      requiredFields.forEach((field) => {
+        const payload: Record<string, unknown> = validPayload();
+        delete payload[field];
         const result = createVaultSchema.safeParse(payload);
         expect(result.success).toBe(false);
       });
     });
 
     it("rejects array instead of object for destinations", () => {
-      const result = createVaultSchema.safeParse({
-        ...validPayload(),
-        destinations: [VALID_ADDR, VALID_ADDR],
-      });
+      const payload: Record<string, unknown> = validPayload();
+      payload.destinations = ["not", "an", "object"];
+      const result = createVaultSchema.safeParse(payload);
       expect(result.success).toBe(false);
     });
 
@@ -523,8 +532,7 @@ describe("createVaultSchema validation", () => {
       expect(result.success).toBe(false);
       if (!result.success) {
         const errors = flattenZodErrors(result.error);
-        const paths = errors.map((e) => e.path);
-
+        const paths = [...new Set(errors.map((e: { path: string }) => e.path))]; // Remove duplicates
         expect(paths).toEqual(
           expect.arrayContaining([
             "milestones[0].title",
@@ -811,7 +819,7 @@ describe("createVaultSchema validation", () => {
       const result = createVaultSchema.safeParse({
         ...validPayload(),
         onChain: {
-          mode: 'invalid' as any,
+          mode: 'invalid' as 'build' | 'submit',
         },
       });
       expect(result.success).toBe(false);
@@ -819,7 +827,7 @@ describe("createVaultSchema validation", () => {
 
     it("accepts onChain field as optional", () => {
       const payload = validPayload();
-      delete (payload as any).onChain;
+      delete (payload as Record<string, unknown>).onChain;
       const result = createVaultSchema.safeParse(payload);
       expect(result.success).toBe(true);
     });
@@ -867,7 +875,7 @@ describe("createVaultSchema validation", () => {
 
     it("accepts creator field as optional", () => {
       const payload = validPayload();
-      delete (payload as any).creator;
+      delete (payload as Record<string, unknown>).creator;
       const result = createVaultSchema.safeParse(payload);
       expect(result.success).toBe(true);
     });
