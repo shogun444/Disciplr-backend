@@ -15,9 +15,7 @@ import { createAuditLog } from '../lib/audit-logs.js'
 import { formatValidationError, utcTimestampSchema } from '../lib/validation.js'
 
 // Helpers
-
 const requiredString = (field: string) => z.string().trim().min(1, `${field} is required`)
-
 const enqueueOptionsSchema = {
   delayMs: z.number().finite().min(0, 'delayMs must be greater than or equal to 0').optional(),
   maxAttempts: z
@@ -88,9 +86,8 @@ const enqueueTypedJob = (
 }
 
 // Router factory
-
 export interface JobsRouterOptions {
-  /** Override the rate limiter applied to POST /enqueue. Pass a no-op in tests. */
+  /** Override rate limiter applied to POST /enqueue. Pass a no-op in tests. */
   enqueueLimiter?: RequestHandler
 }
 
@@ -114,7 +111,7 @@ export const createJobsRouter = (jobSystem: BackgroundJobSystem, options: JobsRo
     const totalExecutions = metrics.totals.executions
     const failureRate = totalExecutions > 0 ? metrics.totals.failed / totalExecutions : 0
     const status = !metrics.running ? 'down' : failureRate > 0.25 ? 'degraded' : 'ok'
-
+    
     res.status(status === 'down' ? 503 : 200).json({
       status,
       timestamp: new Date().toISOString(),
@@ -140,7 +137,7 @@ export const createJobsRouter = (jobSystem: BackgroundJobSystem, options: JobsRo
       const { payload, type } = parseResult.data
       const options: EnqueueOptions = parseEnqueueOptions(parseResult.data)
       const queuedJob = enqueueTypedJob(jobSystem, type, payload as JobPayloadByType[JobType], options)
-
+      
       createAuditLog({
         actor_user_id: req.user!.userId,
         action: 'job.enqueue',

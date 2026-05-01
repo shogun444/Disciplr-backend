@@ -15,7 +15,6 @@ import { createVaultWithMilestones, getVaultById, listVaults, cancelVaultById } 
 import { createVaultSchema, flattenZodErrors } from '../services/vaultValidation.js'
 import { queryParser } from '../middleware/queryParser.js'
 import { utcNow } from '../utils/timestamps.js'
-import { prisma } from '../lib/prisma.js'
 import { requireJson } from '../middleware/requireJson.js'
 import type { VaultCreateResponse } from '../types/vaults.js'
 
@@ -38,7 +37,6 @@ export interface Vault {
 }
 
 // GET /api/vaults
-
 vaultsRouter.get(
   '/',
   authenticate,
@@ -61,14 +59,8 @@ vaultsRouter.get(
   },
 )
 
-/**
- * POST /api/vaults
- */
+// POST /api/vaults
 vaultsRouter.post('/', authenticate, requireJson, async (req: Request, res: Response) => {
-  const { creator, amount, endTimestamp, successDestination, failureDestination, milestoneHash, verifierAddress, contractId } = req.body
-// POST /api/vaults 
-
-vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
   // 1. Idempotency – replay cached response if key+hash match
   const idempotencyKey = req.header('idempotency-key') ?? null
   const requestHash = hashRequestPayload(req.body)
@@ -102,11 +94,6 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
   try {
     const { vault } = await createVaultWithMilestones(input)
 
-  // 2. Try In-memory
-  const vault = vaults.find(v => v.id === req.params.id)
-  if (!vault) {
-    res.status(404).json({ error: 'Vault not found' })
-    return
     const responseBody: VaultCreateResponse = {
       vault,
       onChain: await buildVaultCreationPayload(input, vault),
@@ -117,7 +104,6 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
       await saveIdempotentResponse(idempotencyKey!, requestHash, vault.id, responseBody)
     }
 
-    try {
     const actorUserId = (req.header('x-user-id') ?? input.creator) || req.user?.userId || 'unknown'
     createAuditLog({
       actor_user_id: actorUserId,
@@ -134,14 +120,9 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
     console.error('Vault creation failed', error)
     res.status(500).json({ error: 'Failed to create vault.' })
   }
-}
+})
 
-/**
- * POST /api/vaults/:id/cancel
- */
-vaultsRouter.post('/:id/cancel', authenticate, requireJson, async (req, res) => {
-// ─── GET /api/vaults/:id ─────────────────────────────────────────────────────
-
+// GET /api/vaults/:id
 vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
   // Try DB-backed store first (falls back to in-memory automatically)
   try {
@@ -160,18 +141,17 @@ vaultsRouter.get('/:id', authenticate, async (req: Request, res: Response) => {
     res.status(404).json({ error: 'Vault not found' })
     return
   }
-  
-  // Return the vault found in legacy in-memory storage
+
+  // Return vault found in legacy in-memory storage
   res.json(vault)
 })
 
-// ─── POST /api/vaults/:id/cancel ─────────────────────────────────────────────
-
+// POST /api/vaults/:id/cancel
 vaultsRouter.post('/:id/cancel', authenticate, async (req, res) => {
   const actorUserId = req.user!.userId
   const actorRole = req.user!.role
 
-  let existingVault = await VaultService.getVaultById(req.params.id)
+  let existingVault = await getVaultById(req.params.id)
   if (!existingVault) existingVault = vaults.find((v) => v.id === req.params.id)
 
   if (!existingVault) return res.status(404).json({ error: 'Vault not found' })
@@ -181,8 +161,10 @@ vaultsRouter.post('/:id/cancel', authenticate, async (req, res) => {
   }
 
   try {
-    await VaultService.updateVaultStatus(req.params.id, 'cancelled' as any)
-  } catch (_err) { /* non-fatal */ }
+    await cancelVaultById(req.params.id)
+  } catch (_err) {
+    /* non-fatal */
+  }
 
   const arrayIndex = vaults.findIndex((v) => v.id === req.params.id)
   if (arrayIndex !== -1) vaults[arrayIndex].status = 'cancelled'
@@ -191,10 +173,12 @@ vaultsRouter.post('/:id/cancel', authenticate, async (req, res) => {
   res.status(200).json({ message: 'Vault cancelled', id: req.params.id })
 })
 
-// GET /api/vaults/user/:address 
+// GET /api/vaults/user/:address
 vaultsRouter.get('/user/:address', authenticate, async (req: Request, res: Response) => {
   try {
-    const userVaults = await VaultService.getVaultsByUser(req.params.address)
+    const userVaults = await listVaults().then(vaults => 
+      vaults.filter(vault => vault.creator === req.params.address)
+    )
     res.json(userVaults)
   } catch (_err) {
     res.status(500).json({ error: 'Failed to fetch user vaults' })

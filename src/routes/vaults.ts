@@ -83,7 +83,6 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
     }
   }
 
-  // 2. Validate with Zod (Soroban-aligned bounds)
   const parseResult = createVaultSchema.safeParse(req.body)
   if (!parseResult.success) {
     res.status(400).json({ details: flattenZodErrors(parseResult.error) })
@@ -92,10 +91,8 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
 
   const input = parseResult.data
 
-  // 3. Persist and respond
   try {
     const { vault } = await createVaultWithMilestones(input)
-
     const responseBody: VaultCreateResponse = {
       vault,
       onChain: await buildVaultCreationPayload(input, vault),
@@ -116,7 +113,6 @@ vaultsRouter.post('/', authenticate, async (req: Request, res: Response) => {
     })
 
     updateAnalyticsSummary()
-
     res.status(201).json(responseBody)
   } catch (error) {
     console.error('Vault creation failed', error)

@@ -10,6 +10,12 @@ export const VAULT_AMOUNT_MIN = 1
 /** Maximum vault / milestone amount (inclusive). Maps to i128 practical upper-bound. */
 export const VAULT_AMOUNT_MAX = 1_000_000_000
 
+/** Minimum number of milestones in a vault. */
+export const VAULT_MILESTONES_MIN = 1
+
+/** Maximum number of milestones in a vault. This caps request size and enforces operational limits. */
+export const VAULT_MILESTONES_MAX = 20
+
 /** Stellar strkey G-address: 'G' + 55 base-32 chars (A-Z, 2-7). */
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/
 
@@ -63,7 +69,8 @@ export const createVaultSchema = z
     }),
     milestones: z
       .array(milestoneSchema)
-      .min(1, 'must contain at least one item'),
+      .min(VAULT_MILESTONES_MIN, 'must contain at least one item')
+      .max(VAULT_MILESTONES_MAX, `must contain at most ${VAULT_MILESTONES_MAX} items`),
     creator: stellarAddressSchema.optional(),
     onChain: z
       .object({

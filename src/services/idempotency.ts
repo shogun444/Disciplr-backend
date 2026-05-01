@@ -32,6 +32,10 @@ export async function saveIdempotentResponse(
   idempotencyStore.set(key, { hash, response })
 }
 
+export function resetIdempotencyStore(): void {
+  idempotencyStore.clear()
+}
+
 /**
  * Idempotency Service
  * Handles checking and recording of processed operations to ensure exactly-once execution.

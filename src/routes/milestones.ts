@@ -1,11 +1,12 @@
 import { Router, Request, Response, NextFunction } from 'express'
 import { authenticate } from '../middleware/auth.js'
-import { requireUser, requireVerifier, requireActiveVerifier } from '../middleware/rbac.js'
+import { requireUser, requireVerifier } from '../middleware/rbac.js'
 import {
   createMilestone,
   getMilestonesByVaultId,
   getMilestoneById,
   verifyMilestone,
+  validateMilestone,
   allMilestonesVerified,
 } from '../services/milestones.js'
 import { completeVault } from '../services/vaultTransitions.js'
@@ -50,7 +51,7 @@ milestonesRouter.get('/', (req: Request, res: Response, next: NextFunction) => {
 })
 
 // PATCH /api/vaults/:vaultId/milestones/:id/verify
-milestonesRouter.patch('/:id/verify', authenticate, requireVerifier, requireActiveVerifier, (req: Request, res: Response, next: NextFunction) => {
+milestonesRouter.patch('/:id/verify', authenticate, requireVerifier, (req: Request, res: Response, next: NextFunction) => {
   const { vaultId, id } = req.params
 
   const vault = vaults.find((v) => v.id === vaultId)
@@ -78,7 +79,7 @@ milestonesRouter.patch('/:id/verify', authenticate, requireVerifier, requireActi
 })
 
 // POST /api/vaults/:vaultId/milestones/:id/validate
-milestonesRouter.post('/:id/validate', authenticate, requireVerifier, requireActiveVerifier, (req: Request, res: Response, next: NextFunction) => {
+milestonesRouter.post('/:id/validate', authenticate, requireVerifier, (req: Request, res: Response, next: NextFunction) => {
   const { vaultId, id } = req.params
   const validatorUserId = req.user!.userId
 

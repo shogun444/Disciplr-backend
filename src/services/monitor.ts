@@ -31,7 +31,7 @@ export const checkListenerLag = async (): Promise<void> => {
     const lastProcessedLedger = state?.last_processed_ledger ?? config.startLedger ?? 0
     const lag = latestLedger - lastProcessedLedger
 
-    if (lag > config.lagThreshold) {
+    if (config.lagThreshold !== undefined && lag > config.lagThreshold) {
       console.warn(`[Monitor] Horizon listener lag detected: ${lag} ledgers (Threshold: ${config.lagThreshold})`)
       console.warn(`[Monitor] Latest ledger: ${latestLedger}, Last processed: ${lastProcessedLedger}`)
     }

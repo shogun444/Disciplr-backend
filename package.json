@@ -13,6 +13,8 @@
     "test:perf": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testPathPattern=performance --maxWorkers=1",
     "test:api-keys": "tsx --test src/routes/apiKeys.test.ts",
     "test:vaults": "tsx --test src/routes/vaults.test.ts",
+    "test:vault-validation": "node --experimental-vm-modules node_modules/jest/bin/jest.js src/services/vaultValidation.test.ts",
+    "test:vaults-integration": "tsx --test src/routes/vaults.test.ts",
     "test:smoke": "tsx --test src/tests/smoke/api.smoke.test.ts",
     "migrate:make": "knex migrate:make --knexfile knexfile.cjs --migrations-directory db/migrations --extension cjs",
     "migrate:latest": "knex migrate:latest --knexfile knexfile.cjs",

@@ -1,8 +1,6 @@
 import { Router, Request, Response } from 'express'
-import { authenticate } from '../middleware/auth.js'
 import { requireAdmin } from '../middleware/rbac.js'
 import { authorize } from '../middleware/auth.middleware.js'
-import { requireAdmin } from '../middleware/rbac.js'
 import { metricsRateLimiter } from '../middleware/rateLimiter.js'
 import { UserRole, UserStatus } from '../types/user.js'
 import { userService, DeleteResult } from '../services/user.service.js'
@@ -55,7 +53,7 @@ const sanitizeReasonText = (reason: string): string => {
 }
 
 // Apply authentication to all admin routes
-adminRouter.use(authenticate)
+adminRouter.use(authorize)
 adminRouter.use(requireAdmin)
 
 /**
@@ -435,7 +433,7 @@ adminRouter.post('/users/:id/restore', async (req, res) => {
  * GET /api/admin/db/metrics
  * Rate limited to 20 req/min for security and performance
  */
-adminRouter.get('/db/metrics', metricsRateLimiter, (req: Request, res: Response) => {
+adminRouter.get('/db/metrics', metricsRateLimiter, async (req: Request, res: Response) => {
   try {
     // Validate pool is available
     if (!pool) {
