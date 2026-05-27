@@ -237,3 +237,28 @@ export const buildVaultCreationPayload = async (
     }
   }
 }
+
+// ─── Slash-on-miss payload builder ──────────────────────────────────────────
+
+/**
+ * Builds the on-chain payload descriptor for the slash_on_miss contract call.
+ * Does NOT submit a real Soroban transaction; submission is gated behind
+ * environment configuration the same way as buildVaultCreationPayload.
+ * Status is always 'not_configured' until a real submit path is wired.
+ */
+export const buildSlashOnMissPayload = (vaultId: string) => {
+  return {
+    mode: 'submit' as const,
+    payload: {
+      contractId: process.env.SOROBAN_CONTRACT_ID ?? DEFAULT_CONTRACT_ID,
+      networkPassphrase: process.env.SOROBAN_NETWORK_PASSPHRASE ?? 'Test SDF Network ; September 2015',
+      sourceAccount: process.env.SOROBAN_SOURCE_ACCOUNT ?? DEFAULT_SOURCE_ACCOUNT,
+      method: 'slash_on_miss',
+      args: { vaultId },
+    },
+    submission: {
+      attempted: true,
+      status: 'not_configured' as const,
+    },
+  }
+}
