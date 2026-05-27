@@ -65,7 +65,7 @@ export interface VaultCreateResponse {
       attempted: boolean
       status: 'not_requested' | 'not_configured' | 'success' | 'error'
       txHash?: string
-      error?: string
+      error?: string | { code: string; message: string; details?: unknown }
     }
   }
   idempotency: {

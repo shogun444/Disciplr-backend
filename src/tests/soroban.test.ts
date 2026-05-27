@@ -294,7 +294,7 @@ describe('soroban service', () => {
       expect(passedArgs.vaultId).toBe(vault.id)
     })
 
-    it('returns error status when submission fails', async () => {
+    it('returns error status with generic message when submission fails with non-contract error', async () => {
       const { client } = createMockClient(undefined, new Error('RPC timeout'))
       setSorobanClient(client)
 
@@ -306,6 +306,25 @@ describe('soroban service', () => {
       expect(result.submission.attempted).toBe(true)
       expect(result.submission.status).toBe('error')
       expect(result.submission.error).toBe('RPC timeout')
+      expect(result.submission.txHash).toBeUndefined()
+    })
+
+    it('returns structured error when submission fails with contract error', async () => {
+      const { client } = createMockClient(undefined, new Error('HostError: Error(Contract, 4)'))
+      setSorobanClient(client)
+
+      const input = makeInput({ onChain: { mode: 'submit' } })
+      const vault = makeVault()
+
+      const result = await buildVaultCreationPayload(input, vault)
+
+      expect(result.submission.attempted).toBe(true)
+      expect(result.submission.status).toBe('error')
+      expect(result.submission.error).toEqual({
+        code: 'VALIDATION_ERROR',
+        message: 'Invalid deadline',
+        details: { contractErrorCode: 4 },
+      })
       expect(result.submission.txHash).toBeUndefined()
     })
 

@@ -1,4 +1,5 @@
 import type { CreateVaultInput, PersistedVault, VaultCreateResponse } from '../types/vaults.js'
+import { AppError } from '../middleware/errorHandler.js'
 
 const DEFAULT_CONTRACT_ID = 'CONTRACT_ID_NOT_CONFIGURED'
 const DEFAULT_SOURCE_ACCOUNT = 'SOURCE_ACCOUNT_NOT_CONFIGURED'
@@ -227,6 +228,20 @@ export const buildVaultCreationPayload = async (
       submission: { attempted: true, status: 'success', txHash },
     }
   } catch (err) {
+    const appError = AppError.fromContractError(err)
+    if (appError) {
+      log('error', 'soroban.submit_error_contract', { vaultId: vault.id, code: appError.code, message: appError.message, details: appError.details })
+      return {
+        mode,
+        payload,
+        submission: { 
+          attempted: true, 
+          status: 'error', 
+          error: { code: appError.code, message: appError.message, details: appError.details } 
+        },
+      }
+    }
+
     const message = err instanceof Error ? err.message : 'Unknown submission error'
     log('error', 'soroban.submit_error', { vaultId: vault.id, error: message })
 
