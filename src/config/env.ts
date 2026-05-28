@@ -94,15 +94,14 @@ export const envSchema = z
       'must be a valid Soroban contract ID (56-char base32 starting with C)'
     ),
     SOROBAN_NETWORK_PASSPHRASE: z.string().optional(),
-    SOROBAN_SOURCE_ACCOUNT: z.string().optional().refine(
-      (v) => !v || /^G[0-9A-Z]{55}$/.test(v),
-      'must be a valid Stellar account public key (starting with G)'
-    ),
+    SOROBAN_SOURCE_ACCOUNT: z.string().optional(),
     SOROBAN_RPC_URL: httpUrl().optional(),
-    SOROBAN_SECRET_KEY: z.string().optional().refine(
-      (v) => !v || /^S[0-9A-Z]{55}$/.test(v),
-      'must be a valid Stellar secret key (starting with S)'
-    ),
+    SOROBAN_SECRET_KEY: z.string().optional(),
+    SOROBAN_SUBMIT_POLL_INTERVAL_MS: positiveInt(1_000),
+    SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS: positiveInt(30),
+    SOROBAN_RPC_TIMEOUT_MS: positiveInt(30_000),
+    SOROBAN_SUBMIT_RETRY_MAX_BACKOFF_MS: positiveInt(5_000),
+    STELLAR_NETWORK_PASSPHRASE: z.string().optional(),
 
     // ── Job system ──────────────────────────────────────────────
     JOB_WORKER_CONCURRENCY: positiveInt(2),

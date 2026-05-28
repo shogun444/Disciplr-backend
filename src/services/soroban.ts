@@ -1,8 +1,16 @@
 import type { CreateVaultInput, PersistedVault, VaultCreateResponse } from '../types/vaults.js'
-import { AppError } from '../middleware/errorHandler.js'
+import { retryWithBackoff, sleep, type RetryConfig } from '../utils/retry.js'
 
 const DEFAULT_CONTRACT_ID = 'CONTRACT_ID_NOT_CONFIGURED'
 const DEFAULT_SOURCE_ACCOUNT = 'SOURCE_ACCOUNT_NOT_CONFIGURED'
+const DEFAULT_SUBMIT_POLL_INTERVAL_MS = 1000
+const DEFAULT_SUBMIT_POLL_MAX_ATTEMPTS = 30
+const DEFAULT_RPC_TIMEOUT_MS = 30_000
+const DEFAULT_SUBMIT_RETRY_MAX_ATTEMPTS = 3
+const DEFAULT_SUBMIT_RETRY_BACKOFF_MS = 100
+const DEFAULT_SUBMIT_RETRY_MAX_BACKOFF_MS = 5_000
+const DEFAULT_SUBMIT_RETRY_BACKOFF_MULTIPLIER = 2
+const DEFAULT_SUBMIT_RETRY_JITTER_FACTOR = 0.5
 
 // ─── Soroban configuration resolved from env ────────────────────────────────
 
@@ -12,7 +20,27 @@ export interface SorobanConfig {
   sourceAccount: string
   rpcUrl: string
   secretKey: string
+  submitPollIntervalMs: number
+  submitPollMaxAttempts: number
+  rpcTimeoutMs: number
+  submitRetry: RetryConfig
 }
+
+const positiveIntFromEnv = (key: string, fallback: number): number => {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return fallback
+
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const getSubmitRetryConfig = (): RetryConfig => ({
+  maxAttempts: positiveIntFromEnv('RETRY_MAX_ATTEMPTS', DEFAULT_SUBMIT_RETRY_MAX_ATTEMPTS),
+  initialBackoffMs: positiveIntFromEnv('RETRY_BACKOFF_MS', DEFAULT_SUBMIT_RETRY_BACKOFF_MS),
+  maxBackoffMs: positiveIntFromEnv('SOROBAN_SUBMIT_RETRY_MAX_BACKOFF_MS', DEFAULT_SUBMIT_RETRY_MAX_BACKOFF_MS),
+  backoffMultiplier: DEFAULT_SUBMIT_RETRY_BACKOFF_MULTIPLIER,
+  jitterFactor: DEFAULT_SUBMIT_RETRY_JITTER_FACTOR,
+})
 
 /**
  * Returns the Soroban config only when ALL required env vars are present.
@@ -29,7 +57,17 @@ export const getSorobanConfig = (): SorobanConfig | null => {
     return null
   }
 
-  return { contractId, networkPassphrase, sourceAccount, rpcUrl, secretKey }
+  return {
+    contractId,
+    networkPassphrase,
+    sourceAccount,
+    rpcUrl,
+    secretKey,
+    submitPollIntervalMs: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_INTERVAL_MS', DEFAULT_SUBMIT_POLL_INTERVAL_MS),
+    submitPollMaxAttempts: positiveIntFromEnv('SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS', DEFAULT_SUBMIT_POLL_MAX_ATTEMPTS),
+    rpcTimeoutMs: positiveIntFromEnv('SOROBAN_RPC_TIMEOUT_MS', DEFAULT_RPC_TIMEOUT_MS),
+    submitRetry: getSubmitRetryConfig(),
+  }
 }
 
 /**
@@ -51,12 +89,69 @@ export interface SorobanClient {
   ): Promise<{ txHash: string }>
 }
 
+type StellarSdkLoader = () => Promise<any>
+
+const withRpcTimeout = async <T>(
+  operation: Promise<T>,
+  operationName: string,
+  timeoutMs: number,
+): Promise<T> => {
+  let timeout: NodeJS.Timeout | undefined
+
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`Soroban RPC ${operationName} timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+  })
+
+  try {
+    return await Promise.race([operation, timeoutPromise])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
+const isRetryableSorobanRpcError = (error: Error): boolean => {
+  const message = error.message.toLowerCase()
+  return (
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('connection') ||
+    message.includes('network') ||
+    message.includes('econnreset') ||
+    message.includes('econnrefused') ||
+    message.includes('enotfound') ||
+    message.includes('etimedout') ||
+    message.includes('socket') ||
+    message.includes('429') ||
+    message.includes('rate limit') ||
+    message.includes('too many requests') ||
+    message.includes('503') ||
+    message.includes('502') ||
+    message.includes('504')
+  )
+}
+
+const retryRpc = async <T>(
+  operationName: string,
+  config: SorobanConfig,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  return retryWithBackoff(
+    () => withRpcTimeout(operation(), operationName, config.rpcTimeoutMs),
+    config.submitRetry,
+    isRetryableSorobanRpcError,
+  )
+}
+
 /**
  * Default production client that calls the real Stellar SDK.
  * Imported lazily so the module loads even when @stellar/stellar-sdk
  * is not fully configured (e.g. in unit test environments).
  */
-export const defaultSorobanClient: SorobanClient = {
+export const createDefaultSorobanClient = (
+  loadSdk: StellarSdkLoader = () => import('@stellar/stellar-sdk'),
+): SorobanClient => ({
   async submitVaultCreation(config, args) {
     // Dynamic import keeps the top-level module lightweight and avoids
     // breaking test suites that never exercise real submission.
@@ -68,11 +163,11 @@ export const defaultSorobanClient: SorobanClient = {
       TransactionBuilder,
       nativeToScVal,
       BASE_FEE,
-    } = await import('@stellar/stellar-sdk')
+    } = await loadSdk()
 
     const server = new SorobanRpc.Server(config.rpcUrl)
     const keypair = Keypair.fromSecret(config.secretKey)
-    const account = await server.getAccount(config.sourceAccount)
+    const account = await retryRpc('getAccount', config, () => server.getAccount(config.sourceAccount))
 
     const contract = new Contract(config.contractId)
     const callOp = contract.call(
@@ -92,22 +187,24 @@ export const defaultSorobanClient: SorobanClient = {
       .setTimeout(30)
       .build()
 
-    const prepared = await server.prepareTransaction(tx)
+    const prepared = await retryRpc('prepareTransaction', config, () => server.prepareTransaction(tx))
     prepared.sign(keypair)
 
-    const response = await server.sendTransaction(prepared)
+    const response = await retryRpc('sendTransaction', config, () => server.sendTransaction(prepared))
 
     if (response.status === 'ERROR') {
       throw new Error(`Soroban sendTransaction failed: ${response.status}`)
     }
 
-    // Poll for completion
-    let getResponse = await server.getTransaction(response.hash)
-    const maxAttempts = 30
-    let attempts = 0
-    while (getResponse.status === 'NOT_FOUND' && attempts < maxAttempts) {
-      await new Promise((r) => setTimeout(r, 1000))
-      getResponse = await server.getTransaction(response.hash)
+    if (!response.hash) {
+      throw new Error('Soroban sendTransaction did not return a transaction hash')
+    }
+
+    let getResponse = await retryRpc('getTransaction', config, () => server.getTransaction(response.hash))
+    let attempts = 1
+    while (getResponse.status === 'NOT_FOUND' && attempts < config.submitPollMaxAttempts) {
+      await sleep(config.submitPollIntervalMs)
+      getResponse = await retryRpc('getTransaction', config, () => server.getTransaction(response.hash))
       attempts++
     }
 
@@ -117,7 +214,9 @@ export const defaultSorobanClient: SorobanClient = {
 
     return { txHash: response.hash }
   },
-}
+})
+
+export const defaultSorobanClient: SorobanClient = createDefaultSorobanClient()
 
 // Allow overriding the client (for tests)
 let _client: SorobanClient = defaultSorobanClient

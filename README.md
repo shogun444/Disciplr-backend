@@ -126,6 +126,11 @@ curl -X POST http://localhost:3000/api/jobs/enqueue \
 - `DEADLINE_CHECK_INTERVAL_MS` (default: `60000`)
 - `ANALYTICS_RECOMPUTE_INTERVAL_MS` (default: `300000`)
 - `MAX_JSON_BODY_SIZE` (default: `500kb`)
+- `SOROBAN_CONTRACT_ID`, `SOROBAN_NETWORK_PASSPHRASE`, `SOROBAN_SOURCE_ACCOUNT`, `SOROBAN_RPC_URL`, `SOROBAN_SECRET_KEY` enable `onChain.mode: "submit"` for vault creation when all are set.
+- `SOROBAN_SUBMIT_POLL_INTERVAL_MS` (default: `1000`) controls the delay between `getTransaction` polls.
+- `SOROBAN_SUBMIT_POLL_MAX_ATTEMPTS` (default: `30`) caps transaction-status polling.
+- `SOROBAN_RPC_TIMEOUT_MS` (default: `30000`) bounds each Soroban RPC call.
+- `RETRY_MAX_ATTEMPTS`, `RETRY_BACKOFF_MS`, and `SOROBAN_SUBMIT_RETRY_MAX_BACKOFF_MS` tune jittered retry/backoff for transient Soroban RPC failures.
 
 ### Soroban environment variables
 
