@@ -4,16 +4,19 @@ import { requireVerifier, requireAdmin } from '../middleware/rbac.js'
 import { recordVerification, listVerifications } from '../services/verifiers.js'
 import { createAuditLog } from '../lib/audit-logs.js'
 import { AppError } from '../middleware/errorHandler.js'
+import { createEvidenceReference, EvidenceReferenceValidationError } from '../services/evidence.js'
 
 export const verificationsRouter = Router()
 
 verificationsRouter.post('/', authenticate, requireVerifier, async (req: Request, res: Response, next: NextFunction) => {
   const payload = req.user!
   const verifierUserId = payload.userId
-  const { targetId, result, disputed } = req.body as {
+  const { targetId, result, disputed, evidenceHash, evidenceReferenceUrl } = req.body as {
     targetId?: string
     result?: 'approved' | 'rejected'
     disputed?: boolean
+    evidenceHash?: string
+    evidenceReferenceUrl?: string
   }
 
   if (!targetId || !targetId.trim()) {
@@ -22,6 +25,14 @@ verificationsRouter.post('/', authenticate, requireVerifier, async (req: Request
 
   if (result !== 'approved' && result !== 'rejected') {
     return next(AppError.validation("result must be 'approved' or 'rejected'"))
+  }
+
+  if (!evidenceHash || !evidenceHash.trim()) {
+    return next(AppError.validation('evidenceHash is required'))
+  }
+
+  if (!evidenceReferenceUrl || !evidenceReferenceUrl.trim()) {
+    return next(AppError.validation('evidenceReferenceUrl is required'))
   }
 
   try {
@@ -34,6 +45,12 @@ verificationsRouter.post('/', authenticate, requireVerifier, async (req: Request
       !!disputed
     )
 
+    const evidenceReference = await createEvidenceReference(
+      rec.id,
+      evidenceHash.trim(),
+      evidenceReferenceUrl.trim(),
+    )
+
     createAuditLog({
       actor_user_id: verifierUserId,
       action: 'verification.decision.recorded',
@@ -42,13 +59,18 @@ verificationsRouter.post('/', authenticate, requireVerifier, async (req: Request
       metadata: {
         result,
         disputed: !!disputed,
+        evidence_attached: true,
       },
     })
 
-    res.status(201).json({ verification: rec })
+    res.status(201).json({ verification: rec, evidenceReference })
   } catch (error: any) {
     if (error?.name === 'VerificationConflictError') {
       return next(AppError.conflict('conflicting verification decision already exists'))
+    }
+
+    if (error?.name === 'EvidenceReferenceValidationError') {
+      return next(AppError.validation(error.message))
     }
 
     return next(AppError.internal('failed to record verification decision'))

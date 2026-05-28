@@ -4,6 +4,7 @@ import { jest } from '@jest/globals'
 
 const mockRecordVerification = jest.fn<any>()
 const mockListVerifications = jest.fn<any>()
+const mockCreateEvidenceReference = jest.fn<any>()
 
 jest.unstable_mockModule('../middleware/auth.js', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
@@ -26,6 +27,10 @@ jest.unstable_mockModule('../services/verifiers.js', () => ({
   listVerifications: mockListVerifications,
 }))
 
+jest.unstable_mockModule('../services/evidence.js', () => ({
+  createEvidenceReference: mockCreateEvidenceReference,
+}))
+
 const { verificationsRouter } = await import('../routes/verifications.js')
 
 describe('verification route spoofing protections', () => {
@@ -36,6 +41,7 @@ describe('verification route spoofing protections', () => {
   beforeEach(() => {
     mockRecordVerification.mockReset()
     mockListVerifications.mockReset()
+    mockCreateEvidenceReference.mockReset()
   })
 
   test('uses authenticated verifier identity, not client-supplied body identity', async () => {
@@ -47,6 +53,14 @@ describe('verification route spoofing protections', () => {
       disputed: false,
       timestamp: new Date().toISOString(),
     })
+    mockCreateEvidenceReference.mockResolvedValue({
+      id: 'evidence-1',
+      verificationId: 'verification-1',
+      evidenceHash: 'hash-0123456789abcdef0123456789abcdef',
+      referenceUrl: 'https://example.com/object.pdf?Expires=32503680000&signature=abc',
+      expiresAt: new Date('2030-01-01T00:00:00.000Z').toISOString(),
+      createdAt: new Date().toISOString(),
+    })
 
     await request(app)
       .post('/api/verifications')
@@ -55,9 +69,37 @@ describe('verification route spoofing protections', () => {
         userId: 'spoofed-verifier',
         targetId: 'target-1',
         result: 'approved',
+        evidenceHash: 'hash-0123456789abcdef0123456789abcdef',
+        evidenceReferenceUrl: 'https://example.com/object.pdf?Expires=32503680000&signature=abc',
       })
       .expect(201)
 
     expect(mockRecordVerification).toHaveBeenCalledWith('auth-verifier', 'target-1', 'approved', false)
+    expect(mockCreateEvidenceReference).toHaveBeenCalledWith(
+      'verification-1',
+      'hash-0123456789abcdef0123456789abcdef',
+      'https://example.com/object.pdf?Expires=32503680000&signature=abc',
+    )
+  })
+
+  test('requires evidence hash and reference URL', async () => {
+    mockRecordVerification.mockResolvedValue({
+      id: 'verification-2',
+      verifierUserId: 'auth-verifier',
+      targetId: 'target-2',
+      result: 'approved',
+      disputed: false,
+      timestamp: new Date().toISOString(),
+    })
+
+    await request(app)
+      .post('/api/verifications')
+      .send({
+        targetId: 'target-2',
+        result: 'approved',
+      })
+      .expect(400)
+
+    expect(mockCreateEvidenceReference).not.toHaveBeenCalled()
   })
 })

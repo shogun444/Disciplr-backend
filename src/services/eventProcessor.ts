@@ -3,6 +3,7 @@ import { ParsedEvent, ProcessorConfig, VaultEventPayload, MilestoneEventPayload,
 import { retryWithBackoff, isRetryable } from '../utils/retry.js'
 import { createAuditLog } from '../lib/audit-logs.js'
 import { IdempotencyService } from './idempotency.js'
+import { transitionVaultStatus } from './vaultTransitions.js'
 
 /**
  * Error thrown when a dependency (e.g., a vault for a milestone) is not yet in the DB.
@@ -179,12 +180,12 @@ export class EventProcessor {
         .ignore() // Use ignore instead of merge to prevent overwriting if vault_created arrives late
     } else {
       const status = event.eventType.replace('vault_', '') as 'completed' | 'failed' | 'cancelled'
-      const updated = await trx('vaults')
-        .where({ id: payload.vaultId })
-        .update({ status, updated_at: new Date() })
-      
-      if (!updated) {
-        throw new DependencyNotFoundError(`Vault not found for update: ${payload.vaultId}`)
+      const transition = await transitionVaultStatus(trx, payload.vaultId, status)
+      if (!transition.success) {
+        if (transition.error?.includes('not found')) {
+          throw new DependencyNotFoundError(`Vault not found for update: ${payload.vaultId}`)
+        }
+        throw new Error(transition.error || 'Vault status transition failed')
       }
     }
   }
@@ -234,10 +235,19 @@ export class EventProcessor {
       })
       .onConflict('id')
       .ignore()
-    
-    // If approved, update milestone current amount or status
+
+    const updateFields: Record<string, unknown> = { updated_at: new Date() }
     if (payload.validationResult === 'approved') {
-        // Logic to update milestone status/amount could go here
+      updateFields.status = 'completed'
+      updateFields.current_amount = milestone.target_amount
+    } else if (payload.validationResult === 'rejected') {
+      updateFields.status = 'failed'
+    }
+
+    if (Object.keys(updateFields).length > 1) {
+      await trx('milestones')
+        .where({ id: payload.milestoneId })
+        .update(updateFields)
     }
   }
 
