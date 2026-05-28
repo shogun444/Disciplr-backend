@@ -1,175 +1,356 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#![no_std]
 
-#[derive(Debug)]
-pub struct Vault {
-    // staked amount in smallest units
-    staked: AtomicU64,
-    // single-spend guard: once a withdrawal or slash succeeds, this becomes true
-    spent: AtomicBool,
-    // whether the vault was slashed
-    slashed: AtomicBool,
-    // deadline as unix seconds
-    deadline_secs: u64,
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, log, symbol_short, Address, Env,
+    String, Vec,
+};
+
+// ─── Storage keys ────────────────────────────────────────────────────────────
+//
+// "Vault"    — instance storage key for the Vault / VaultV1 struct.
+// "VaultVer" — instance storage key for the schema version sentinel (u32).
+//              Written by initialize() and migrate(); read by migrate() to
+//              detect the stored schema without touching the vault struct
+//              (Soroban XDR decoding is field-count strict — trying to decode
+//              a VaultV1 slot as Vault panics at the boundary).
+
+// ─── Error codes ─────────────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VaultError {
+    AlreadyInitialized = 1,
+    NotInitialized = 2,
+    Unauthorized = 3,
+    InvalidAmount = 4,
+    InvalidDeadline = 5,
+    VaultExpired = 6,
+    VaultNotActive = 7,
+    MilestoneNotFound = 8,
+    MilestoneAlreadyValidated = 9,
+    InvalidMilestoneAmount = 10,
 }
 
-impl Vault {
-    pub fn new(staked: u64, deadline_secs: u64) -> Arc<Self> {
-        Arc::new(Vault {
-            staked: AtomicU64::new(staked),
-            spent: AtomicBool::new(false),
-            slashed: AtomicBool::new(false),
-            deadline_secs,
-        })
-    }
+// ─── Data types ──────────────────────────────────────────────────────────────
 
-    fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0))
-            .as_secs()
-    }
+/// Status of the accountability vault.
+///
+/// NOTE: Enum variants MUST NOT be reordered or removed — Soroban encodes
+/// enum variants by index. Append-only changes are safe; reordering or
+/// deletion will break on-chain storage decoding for existing instances.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VaultStatus {
+    Draft = 0,
+    Active = 1,
+    Completed = 2,
+    Failed = 3,
+    Cancelled = 4,
+}
 
-    // Attempt to withdraw before or at the deadline. Returns the paid out amount on success.
-    pub fn withdraw(&self, now_secs: Option<u64>) -> Result<u64, &'static str> {
-        let now = now_secs.unwrap_or_else(Self::now_secs);
-        // Guard: cannot withdraw after deadline
-        if now > self.deadline_secs {
-            return Err("deadline_passed");
+/// A single milestone within the vault.
+///
+/// STORAGE LAYOUT CONTRACT:
+/// - Fields are encoded in declaration order by soroban-sdk.
+/// - New fields MUST be appended at the end.
+/// - Existing fields MUST NOT be reordered, renamed, or removed.
+/// - Adding a field is safe IF the decoder tolerates missing trailing fields
+///   (soroban-sdk does NOT — so a migration function must backfill).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Milestone {
+    pub id: String,
+    pub title: String,
+    pub amount: i128,
+    pub due_date: u64,
+    pub validated: bool,
+    pub validated_at: u64,
+    pub validated_by: Address,
+}
+
+/// The core accountability vault struct persisted in contract storage.
+///
+/// STORAGE LAYOUT CONTRACT:
+/// - Fields are encoded in declaration order by soroban-sdk.
+/// - New fields MUST be appended at the end.
+/// - Existing fields MUST NOT be reordered, renamed, or removed.
+/// - The `version` field tracks the schema revision for migration logic.
+///
+/// ## Version history
+///
+/// | Version | Changes                                         |
+/// |---------|-------------------------------------------------|
+/// | 1       | Initial layout (all fields below `version`)     |
+/// | 2       | Added `description` field (append-only)          |
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Vault {
+    /// Schema version — always the first field.
+    pub version: u32,
+    /// Unique identifier for this vault.
+    pub vault_id: String,
+    /// Stellar address of the vault creator.
+    pub creator: Address,
+    /// Total locked amount in stroops.
+    pub amount: i128,
+    /// Unix timestamp when the vault becomes active.
+    pub start_date: u64,
+    /// Unix timestamp when the vault expires.
+    pub end_date: u64,
+    /// Address of the designated verifier.
+    pub verifier: Address,
+    /// Destination address on successful completion.
+    pub success_destination: Address,
+    /// Destination address on failure.
+    pub failure_destination: Address,
+    /// Current status of the vault.
+    pub status: VaultStatus,
+    /// Milestones attached to this vault.
+    pub milestones: Vec<Milestone>,
+    /// Creation timestamp.
+    pub created_at: u64,
+    // ── v2 fields (appended) ──────────────────────────────────────────
+    /// Optional description — added in schema v2.
+    pub description: String,
+}
+
+/// Legacy V1 vault layout — used by migration tests to verify that
+/// data written under the old schema can be decoded and upgraded.
+///
+/// This struct mirrors the original Vault layout WITHOUT the `description`
+/// field. It is intentionally kept in sync with the v1 column list so
+/// snapshot-based tests can round-trip pre-upgrade data.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VaultV1 {
+    pub version: u32,
+    pub vault_id: String,
+    pub creator: Address,
+    pub amount: i128,
+    pub start_date: u64,
+    pub end_date: u64,
+    pub verifier: Address,
+    pub success_destination: Address,
+    pub failure_destination: Address,
+    pub status: VaultStatus,
+    pub milestones: Vec<Milestone>,
+    pub created_at: u64,
+}
+
+// ─── Current schema version ──────────────────────────────────────────────────
+
+pub const CURRENT_VAULT_VERSION: u32 = 2;
+
+// ─── Contract implementation ─────────────────────────────────────────────────
+
+#[contract]
+pub struct AccountabilityVault;
+
+#[contractimpl]
+impl AccountabilityVault {
+    /// Initialize a new accountability vault.
+    pub fn initialize(
+        env: Env,
+        vault_id: String,
+        creator: Address,
+        amount: i128,
+        start_date: u64,
+        end_date: u64,
+        verifier: Address,
+        success_destination: Address,
+        failure_destination: Address,
+        milestones: Vec<Milestone>,
+        description: String,
+    ) -> Result<(), VaultError> {
+        // Ensure caller is authorized
+        creator.require_auth();
+
+        // Guard: cannot re-initialize
+        if env.storage().instance().has(&symbol_short!("Vault")) {
+            return Err(VaultError::AlreadyInitialized);
         }
 
-        // Ensure we only pay out once (single-spend)
-        let was_spent =
-            self.spent
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
-        match was_spent {
-            Ok(false) | Ok(_) => {
-                // take the stake
-                let amount = self.staked.swap(0, Ordering::SeqCst);
-                Ok(amount)
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        if end_date <= start_date {
+            return Err(VaultError::InvalidDeadline);
+        }
+
+        let vault = Vault {
+            version: CURRENT_VAULT_VERSION,
+            vault_id,
+            creator,
+            amount,
+            start_date,
+            end_date,
+            verifier,
+            success_destination,
+            failure_destination,
+            status: VaultStatus::Draft,
+            milestones,
+            created_at: env.ledger().timestamp(),
+            description,
+        };
+
+        env.storage().instance().set(&symbol_short!("Vault"), &vault);
+        // Write version sentinel so migrate() can probe the schema without
+        // decoding the vault struct (avoids XDR field-count panics).
+        env.storage()
+            .instance()
+            .set(&symbol_short!("VaultVer"), &CURRENT_VAULT_VERSION);
+        log!(&env, "vault.initialized version={}", CURRENT_VAULT_VERSION);
+        Ok(())
+    }
+
+    /// Read the current vault state.
+    pub fn get_vault(env: Env) -> Result<Vault, VaultError> {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("Vault"))
+            .ok_or(VaultError::NotInitialized)
+    }
+
+    /// Activate the vault (transition from Draft to Active).
+    pub fn activate(env: Env, caller: Address) -> Result<(), VaultError> {
+        caller.require_auth();
+        let mut vault: Vault = Self::get_vault(env.clone())?;
+
+        if vault.status != VaultStatus::Draft {
+            return Err(VaultError::VaultNotActive);
+        }
+
+        vault.status = VaultStatus::Active;
+        env.storage().instance().set(&symbol_short!("Vault"), &vault);
+        log!(&env, "vault.activated");
+        Ok(())
+    }
+
+    /// Validate a milestone by the designated verifier.
+    pub fn validate_milestone(
+        env: Env,
+        verifier: Address,
+        milestone_id: String,
+    ) -> Result<(), VaultError> {
+        verifier.require_auth();
+        let mut vault: Vault = Self::get_vault(env.clone())?;
+
+        if vault.status != VaultStatus::Active {
+            return Err(VaultError::VaultNotActive);
+        }
+
+        if verifier != vault.verifier {
+            return Err(VaultError::Unauthorized);
+        }
+
+        let mut found = false;
+        let mut new_milestones = Vec::new(&env);
+        let mut all_validated = true;
+
+        for i in 0..vault.milestones.len() {
+            let mut ms = vault.milestones.get(i).unwrap();
+            if ms.id == milestone_id {
+                if ms.validated {
+                    return Err(VaultError::MilestoneAlreadyValidated);
+                }
+                ms.validated = true;
+                ms.validated_at = env.ledger().timestamp();
+                ms.validated_by = verifier.clone();
+                found = true;
             }
-            Err(_) => Err("already_spent"),
-        }
-    }
-
-    // Slash the vault after the deadline. Returns slashed amount on success.
-    pub fn slash_on_miss(&self, now_secs: Option<u64>) -> Result<u64, &'static str> {
-        let now = now_secs.unwrap_or_else(Self::now_secs);
-        if now <= self.deadline_secs {
-            return Err("deadline_not_passed");
-        }
-
-        // Ensure single-spend: only one of withdraw/slash can succeed
-        let was_spent =
-            self.spent
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst);
-        match was_spent {
-            Ok(false) | Ok(_) => {
-                let amount = self.staked.swap(0, Ordering::SeqCst);
-                self.slashed.store(true, Ordering::SeqCst);
-                Ok(amount)
+            if !ms.validated {
+                all_validated = false;
             }
-            Err(_) => Err("already_spent"),
+            new_milestones.push_back(ms);
         }
+
+        if !found {
+            return Err(VaultError::MilestoneNotFound);
+        }
+
+        vault.milestones = new_milestones;
+
+        if all_validated {
+            vault.status = VaultStatus::Completed;
+            log!(&env, "vault.completed");
+        }
+
+        env.storage().instance().set(&symbol_short!("Vault"), &vault);
+        log!(&env, "milestone.validated");
+        Ok(())
     }
 
-    pub fn is_slashed(&self) -> bool {
-        self.slashed.load(Ordering::SeqCst)
+    /// Return the current schema version.
+    pub fn version(_env: Env) -> u32 {
+        CURRENT_VAULT_VERSION
     }
 
-    pub fn remaining(&self) -> u64 {
-        self.staked.load(Ordering::SeqCst)
+    /// Migrate storage from a previous schema version to the current one.
+    /// This is the upgrade entry point called after a contract WASM upgrade.
+    ///
+    /// # Migration strategy
+    ///
+    /// `migrate()` first reads the lightweight `"VaultVer"` sentinel (a `u32`)
+    /// to determine the stored schema without touching the vault struct itself.
+    /// This is necessary because Soroban XDR decoding is **field-count strict**:
+    /// attempting to decode a 12-field `VaultV1` blob as the 13-field `Vault`
+    /// panics with `Error(Object, UnexpectedSize)`. The sentinel lets us choose
+    /// the right decoder before reading the vault.
+    ///
+    /// - **v1 → v2**: read `VaultV1`, write `Vault` with `description` defaulted
+    ///   to `""` and update the sentinel to `CURRENT_VAULT_VERSION`.
+    ///
+    /// Idempotent: calling `migrate()` when the sentinel already equals
+    /// `CURRENT_VAULT_VERSION` is a no-op that never mutates storage.
+    pub fn migrate(env: Env) -> Result<(), VaultError> {
+        let vault_key = symbol_short!("Vault");
+        let ver_key = symbol_short!("VaultVer");
+
+        // ── 1. Fast-path via version sentinel ────────────────────────────────
+        // The sentinel is a plain u32, safe to read regardless of vault layout.
+        if let Some(stored_ver) = env.storage().instance().get::<_, u32>(&ver_key) {
+            if stored_ver >= CURRENT_VAULT_VERSION {
+                log!(&env, "migrate: already at version={}", stored_ver);
+                return Ok(());
+            }
+            // stored_ver < CURRENT_VAULT_VERSION — fall through to upgrade.
+        }
+
+        // ── 2. v1 → v2 upgrade ──────────────────────────────────────────────
+        // Only reached when the sentinel is absent (legacy V1 on-chain data
+        // written before this harness) or < CURRENT_VAULT_VERSION.
+        // VaultV1 exactly mirrors the 12-field wire format for schema v1;
+        // decoding it panics only if the stored field count doesn't match —
+        // which is safe here because we verify the sentinel first.
+        if let Some(v1) = env.storage().instance().get::<_, VaultV1>(&vault_key) {
+            let upgraded = Vault {
+                version: CURRENT_VAULT_VERSION,
+                vault_id: v1.vault_id,
+                creator: v1.creator,
+                amount: v1.amount,
+                start_date: v1.start_date,
+                end_date: v1.end_date,
+                verifier: v1.verifier,
+                success_destination: v1.success_destination,
+                failure_destination: v1.failure_destination,
+                status: v1.status,
+                milestones: v1.milestones,
+                created_at: v1.created_at,
+                description: String::from_str(&env, ""),
+            };
+
+            env.storage().instance().set(&vault_key, &upgraded);
+            env.storage().instance().set(&ver_key, &CURRENT_VAULT_VERSION);
+            log!(&env, "migrate: upgraded v1 → v{}", CURRENT_VAULT_VERSION);
+            return Ok(());
+        }
+
+        // ── 3. Nothing stored — contract was never initialised ───────────────
+        Err(VaultError::NotInitialized)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::Barrier;
-    use std::thread;
-
-    #[test]
-    fn withdraw_before_deadline_succeeds() {
-        let now = Vault::now_secs();
-        let vault = Vault::new(1_000, now + 60);
-        let res = vault.withdraw(Some(now));
-        assert_eq!(res.unwrap(), 1_000);
-        assert_eq!(vault.remaining(), 0);
-        assert!(!vault.is_slashed());
-    }
-
-    #[test]
-    fn withdraw_after_deadline_fails() {
-        let now = Vault::now_secs();
-        let vault = Vault::new(2_000, now - 1);
-        let res = vault.withdraw(Some(now));
-        assert!(res.is_err());
-        assert_eq!(res.err().unwrap(), "deadline_passed");
-        assert_eq!(vault.remaining(), 2_000);
-    }
-
-    #[test]
-    fn slash_after_deadline_succeeds() {
-        let now = Vault::now_secs();
-        let vault = Vault::new(3_000, now - 10);
-        let res = vault.slash_on_miss(Some(now));
-        assert_eq!(res.unwrap(), 3_000);
-        assert!(vault.is_slashed());
-        assert_eq!(vault.remaining(), 0);
-    }
-
-    #[test]
-    fn withdraw_vs_slash_race() {
-        // Simulate a race where one thread calls withdraw and another calls slash_on_miss
-        // Use barrier to start simultaneously and sample times so one path should fail.
-        let now = Vault::now_secs();
-        // set deadline to "now" so that timing is tight; both callers supply now or now+1
-        let deadline = now;
-        let vault = Vault::new(10_000, deadline);
-
-        // Shared counters for payouts
-        let withdraw_paid = Arc::new(AtomicU64::new(0));
-        let slash_paid = Arc::new(AtomicU64::new(0));
-
-        let b = Arc::new(Barrier::new(3));
-
-        let v1 = vault.clone();
-        let wpaid = withdraw_paid.clone();
-        let b1 = b.clone();
-        let t1 = thread::spawn(move || {
-            b1.wait();
-            // try withdraw with now (deadline == now) — allowed
-            match v1.withdraw(Some(deadline)) {
-                Ok(a) => wpaid.store(a, Ordering::SeqCst),
-                Err(_) => (),
-            }
-        });
-
-        let v2 = vault.clone();
-        let spaid = slash_paid.clone();
-        let b2 = b.clone();
-        let t2 = thread::spawn(move || {
-            b2.wait();
-            // try slash with now+1 (deadline passed)
-            match v2.slash_on_miss(Some(deadline + 1)) {
-                Ok(a) => spaid.store(a, Ordering::SeqCst),
-                Err(_) => (),
-            }
-        });
-
-        // let threads start
-        b.wait();
-        t1.join().unwrap();
-        t2.join().unwrap();
-
-        let w = withdraw_paid.load(Ordering::SeqCst);
-        let s = slash_paid.load(Ordering::SeqCst);
-
-        // Ensure single-spend: only one of w or s is non-zero and total equals original
-        assert!((w == 10_000 && s == 0) || (w == 0 && s == 10_000));
-        assert_eq!(w + s, 10_000);
-        assert_eq!(vault.remaining(), 0);
-    }
-}
+mod test;
