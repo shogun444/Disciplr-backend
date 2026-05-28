@@ -4,6 +4,7 @@ import { jest } from '@jest/globals'
 
 const mockRecordVerification = jest.fn<any>()
 const mockListVerifications = jest.fn<any>()
+const mockCreateEvidenceReference = jest.fn<any>()
 
 jest.unstable_mockModule('../middleware/auth.js', () => ({
   authenticate: (req: express.Request, _res: express.Response, next: express.NextFunction) => {
@@ -26,6 +27,10 @@ jest.unstable_mockModule('../services/verifiers.js', () => ({
   listVerifications: mockListVerifications,
 }))
 
+jest.unstable_mockModule('../services/evidence.js', () => ({
+  createEvidenceReference: mockCreateEvidenceReference,
+}))
+
 const { verificationsRouter } = await import('../routes/verifications.js')
 
 const VALID_EVIDENCE_HASH = 'a'.repeat(64)
@@ -38,6 +43,7 @@ describe('verification route spoofing protections', () => {
   beforeEach(() => {
     mockRecordVerification.mockReset()
     mockListVerifications.mockReset()
+    mockCreateEvidenceReference.mockReset()
   })
 
   test('uses authenticated verifier identity, not client-supplied body identity', async () => {
@@ -49,6 +55,14 @@ describe('verification route spoofing protections', () => {
       evidenceHash: VALID_EVIDENCE_HASH,
       disputed: false,
       timestamp: new Date().toISOString(),
+    })
+    mockCreateEvidenceReference.mockResolvedValue({
+      id: 'evidence-1',
+      verificationId: 'verification-1',
+      evidenceHash: 'hash-0123456789abcdef0123456789abcdef',
+      referenceUrl: 'https://example.com/object.pdf?Expires=32503680000&signature=abc',
+      expiresAt: new Date('2030-01-01T00:00:00.000Z').toISOString(),
+      createdAt: new Date().toISOString(),
     })
 
     await request(app)

@@ -4,6 +4,7 @@ import { requireVerifier, requireAdmin } from '../middleware/rbac.js'
 import { recordVerification, listVerifications } from '../services/verifiers.js'
 import { createAuditLog } from '../lib/audit-logs.js'
 import { AppError } from '../middleware/errorHandler.js'
+import { createEvidenceReference, EvidenceReferenceValidationError } from '../services/evidence.js'
 
 export const verificationsRouter = Router()
 
@@ -47,6 +48,12 @@ verificationsRouter.post('/', authenticate, requireVerifier, async (req: Request
       cleanEvidenceHash,
     )
 
+    const evidenceReference = await createEvidenceReference(
+      rec.id,
+      evidenceHash.trim(),
+      evidenceReferenceUrl.trim(),
+    )
+
     createAuditLog({
       actor_user_id: verifierUserId,
       action: 'verification.decision.recorded',
@@ -59,10 +66,14 @@ verificationsRouter.post('/', authenticate, requireVerifier, async (req: Request
       },
     })
 
-    res.status(201).json({ verification: rec })
+    res.status(201).json({ verification: rec, evidenceReference })
   } catch (error: any) {
     if (error?.name === 'VerificationConflictError') {
       return next(AppError.conflict('conflicting verification decision already exists'))
+    }
+
+    if (error?.name === 'EvidenceReferenceValidationError') {
+      return next(AppError.validation(error.message))
     }
 
     return next(AppError.internal('failed to record verification decision'))
